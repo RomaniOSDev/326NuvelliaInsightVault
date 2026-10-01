@@ -9,6 +9,7 @@ struct ConfigResponse {
 }
 
 enum ConfigManagerKeys {
+    static let savedRecord = "ConfigManagerStoredConfig"
     static let savedURL = "ConfigManagerSavedURL"
     static let savedExpires = "ConfigManagerSavedExpires"
 }
@@ -26,31 +27,36 @@ final class ConfigManager {
 
     var storeId: String = "id6796377578"
 
-    private init() {}
+    private init() {
+        migrateLegacyKeysIfNeeded()
+    }
 
     var savedURL: URL? {
-        guard let raw = UserDefaults.standard.string(forKey: ConfigManagerKeys.savedURL) else { return nil }
-        return URL(string: raw)
+        storedConfig?.url
     }
 
     var savedExpires: Int64? {
-        let v = UserDefaults.standard.object(forKey: ConfigManagerKeys.savedExpires) as? Int64
-            ?? (UserDefaults.standard.object(forKey: ConfigManagerKeys.savedExpires) as? Int).map { Int64($0) }
-        return v
+        storedConfig?.expires
     }
 
     var isSavedURLValid: Bool {
-        guard savedURL != nil, let exp = savedExpires else { return false }
-        return exp > Int64(Date().timeIntervalSince1970)
+        guard let record = storedConfig else { return false }
+        guard record.expires > Int64(Date().timeIntervalSince1970) else {
+            clearStoredConfig()
+            return false
+        }
+        return true
     }
 
-    private func saveResponse(url: String?, expires: Int64?) {
-        if let url = url {
-            UserDefaults.standard.set(url, forKey: ConfigManagerKeys.savedURL)
+    private var storedConfig: StoredConfig? {
+        guard let data = UserDefaults.standard.data(forKey: ConfigManagerKeys.savedRecord) else {
+            return nil
         }
-        if let expires = expires {
-            UserDefaults.standard.set(expires, forKey: ConfigManagerKeys.savedExpires)
+        guard let record = try? JSONDecoder().decode(StoredConfig.self, from: data) else {
+            clearStoredConfig()
+            return nil
         }
+        return record
     }
 
     func buildRequestBody() -> Data? {
@@ -113,8 +119,12 @@ final class ConfigManager {
             let http = response as? HTTPURLResponse
             let statusCode = http?.statusCode ?? 0
             let parsed = self?.parseConfigResponse(data: data, statusCode: statusCode) ?? .failure(ConfigError.invalidResponse)
-            if case .success(let config) = parsed, config.ok, let url = config.url {
-                self?.saveResponse(url: url, expires: config.expires)
+            if case .success(let config) = parsed,
+               config.ok,
+               let url = config.url,
+               let expires = config.expires,
+               URL(string: url) != nil {
+                self?.saveStoredConfig(urlString: url, expires: expires)
             }
             DispatchQueue.main.async {
                 switch parsed {
@@ -129,23 +139,101 @@ final class ConfigManager {
     }
 
     private func parseConfigResponse(data: Data?, statusCode: Int) -> Result<ConfigResponse, Error> {
-        guard let data = data else {
+        guard statusCode == 200 else {
             return .failure(ConfigError.invalidResponse)
         }
-        let ok = (statusCode == 200)
-        var url: String?
-        var expires: Int64?
-        var message: String?
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            url = json["url"] as? String
-            if let e = json["expires"] as? Int64 {
-                expires = e
-            } else if let e = json["expires"] as? Int {
-                expires = Int64(e)
-            }
-            message = json["message"] as? String
+        guard let data else {
+            return .failure(ConfigError.invalidResponse)
         }
-        return .success(ConfigResponse(ok: ok, url: url, expires: expires, message: message))
+        let decoder = JSONDecoder()
+        guard let payload = try? decoder.decode(ConfigPayload.self, from: data) else {
+            return .failure(ConfigError.invalidResponse)
+        }
+        let expires = payload.expires?.int64Value
+        let url = payload.url?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasValidURL = url.flatMap { URL(string: $0) } != nil
+        let ok = payload.ok && hasValidURL && expires != nil
+        return .success(
+            ConfigResponse(
+                ok: ok,
+                url: url,
+                expires: expires,
+                message: payload.message
+            )
+        )
+    }
+
+    private func saveStoredConfig(urlString: String, expires: Int64) {
+        guard let url = URL(string: urlString) else { return }
+        let record = StoredConfig(url: url, expires: expires)
+        guard let data = try? JSONEncoder().encode(record) else { return }
+        UserDefaults.standard.set(data, forKey: ConfigManagerKeys.savedRecord)
+        UserDefaults.standard.removeObject(forKey: ConfigManagerKeys.savedURL)
+        UserDefaults.standard.removeObject(forKey: ConfigManagerKeys.savedExpires)
+    }
+
+    private func clearStoredConfig() {
+        UserDefaults.standard.removeObject(forKey: ConfigManagerKeys.savedRecord)
+        UserDefaults.standard.removeObject(forKey: ConfigManagerKeys.savedURL)
+        UserDefaults.standard.removeObject(forKey: ConfigManagerKeys.savedExpires)
+    }
+
+    private func migrateLegacyKeysIfNeeded() {
+        if storedConfig != nil {
+            UserDefaults.standard.removeObject(forKey: ConfigManagerKeys.savedURL)
+            UserDefaults.standard.removeObject(forKey: ConfigManagerKeys.savedExpires)
+            return
+        }
+        let rawURL = UserDefaults.standard.string(forKey: ConfigManagerKeys.savedURL)
+        let expires = UserDefaults.standard.object(forKey: ConfigManagerKeys.savedExpires) as? Int64
+            ?? (UserDefaults.standard.object(forKey: ConfigManagerKeys.savedExpires) as? Int).map { Int64($0) }
+        UserDefaults.standard.removeObject(forKey: ConfigManagerKeys.savedURL)
+        UserDefaults.standard.removeObject(forKey: ConfigManagerKeys.savedExpires)
+        guard let rawURL, let url = URL(string: rawURL), let expires, expires > 0 else { return }
+        saveStoredConfig(urlString: url.absoluteString, expires: expires)
+    }
+}
+
+private struct StoredConfig: Codable {
+    let url: URL
+    let expires: Int64
+}
+
+private struct ConfigPayload: Decodable {
+    let ok: Bool
+    let url: String?
+    let expires: FlexibleExpires?
+    let message: String?
+}
+
+private enum FlexibleExpires: Decodable {
+    case int(Int64)
+    case string(String)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(Int64.self) {
+            self = .int(value)
+            return
+        }
+        if let value = try? container.decode(Int.self) {
+            self = .int(Int64(value))
+            return
+        }
+        if let value = try? container.decode(String.self) {
+            self = .string(value)
+            return
+        }
+        throw DecodingError.dataCorruptedError(in: container, debugDescription: "expires")
+    }
+
+    var int64Value: Int64? {
+        switch self {
+        case .int(let value):
+            return value
+        case .string(let raw):
+            return Int64(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
     }
 }
 

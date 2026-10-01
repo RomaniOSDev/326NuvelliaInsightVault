@@ -7,6 +7,8 @@ import UserNotifications
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate, MessagingDelegate, UNUserNotificationCenterDelegate {
 
+    private static var didStartAppsFlyer = false
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         configureAppsFlyer()
         configurePushNotifications(application)
@@ -35,7 +37,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate, MessagingDelegate, UNUser
 
     /// Called once ATT has been presented (or was already determined).
     static func startAppsFlyerIfNeeded() {
-        AppsFlyerLib.shared().start()
+        let start: () -> Void = {
+            guard !didStartAppsFlyer else { return }
+            didStartAppsFlyer = true
+            AppsFlyerLib.shared().start()
+        }
+        if Thread.isMainThread {
+            start()
+        } else {
+            DispatchQueue.main.sync(execute: start)
+        }
     }
 
     private func configurePushNotifications(_ application: UIApplication) {

@@ -47,9 +47,12 @@ final class LoadingViewController: UIViewController {
     }
 
     deinit {
+        cancelScheduledWork()
         stopOfflineNetworkMonitoring()
+        removeConversionObserver()
         if let becomeActiveObserver {
             NotificationCenter.default.removeObserver(becomeActiveObserver)
+            self.becomeActiveObserver = nil
         }
     }
 
@@ -306,7 +309,7 @@ final class LoadingViewController: UIViewController {
     private func handleConfigFailure() {
         didStartConfigRequest = false
 
-        if let url = ConfigManager.shared.savedURL {
+        if ConfigManager.shared.isSavedURLValid, let url = ConfigManager.shared.savedURL {
             removeConversionObserver()
             transitionToWebView(url: url)
             return
@@ -358,7 +361,7 @@ final class LoadingViewController: UIViewController {
     private func transitionToContentViewOrSavedWebView() {
         stopOfflineNetworkMonitoring()
         removeConversionObserver()
-        if let url = ConfigManager.shared.savedURL {
+        if ConfigManager.shared.isSavedURLValid, let url = ConfigManager.shared.savedURL {
             transitionToWebView(url: url)
         } else {
             transitionToContentView()

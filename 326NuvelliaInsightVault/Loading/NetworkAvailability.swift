@@ -23,7 +23,7 @@ enum NetworkAvailability {
         monitor.start(queue: queue)
 
         queue.asyncAfter(deadline: .now() + 1.0) {
-            finish(true)
+            finish(false)
         }
     }
 }
